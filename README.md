@@ -192,8 +192,4 @@ npm run bench
 npm run bench:competitors
 ```
 
-The competitor/control benchmark is intentionally kept in generated benchmark artifacts and research notes rather than in this README. Package READMEs in this repo avoid cross-library performance claims.
-
-## Research Notes
-
-The source pass for this package is tracked in `research/frontier-linter-sources.md` and `iterations/339-frontier-linter-source-pass.md`.
+The competitor/control benchmark is intentionally kept in generated benchmark artifacts rather than in this README. Package READMEs in this repo avoid cross-library performance claims.

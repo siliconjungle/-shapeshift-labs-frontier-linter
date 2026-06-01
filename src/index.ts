@@ -318,6 +318,40 @@ export interface FrontierLintSourceInput {
   metadata?: unknown;
 }
 
+export type FrontierRequiredPackageUseMode = 'dependency' | 'import' | 'dependency-or-import' | string;
+
+export interface FrontierRequiredPackageUseInput {
+  id?: string;
+  package: string;
+  mode?: FrontierRequiredPackageUseMode;
+  required?: boolean;
+  perSource?: boolean;
+  reason?: string;
+  resourceKinds?: readonly string[];
+  resourceTags?: readonly string[];
+  filePatterns?: readonly string[];
+  importPatterns?: readonly string[];
+  textPatterns?: readonly string[];
+  tags?: readonly string[];
+  metadata?: unknown;
+}
+
+export interface FrontierRequiredPackageUse {
+  id: string;
+  package: string;
+  mode: FrontierRequiredPackageUseMode;
+  required: boolean;
+  perSource: boolean;
+  reason?: string;
+  resourceKinds: string[];
+  resourceTags: string[];
+  filePatterns: string[];
+  importPatterns: string[];
+  textPatterns: string[];
+  tags: string[];
+  metadata?: JsonObject;
+}
+
 export interface FrontierLintBudget {
   maxErrors?: number;
   maxWarnings?: number;
@@ -346,6 +380,7 @@ export interface FrontierLintConfig {
   dangerousEffectPrefixes?: readonly string[];
   forbiddenImports?: readonly string[];
   packageOrder?: readonly string[];
+  requiredPackageUses?: readonly FrontierRequiredPackageUseInput[];
   now?: number | string | Date;
   maxEvidenceAgeMs?: number;
   budgets?: FrontierLintBudget;
@@ -445,6 +480,7 @@ export interface RequiredFrontierLintConfig {
   dangerousEffectPrefixes: readonly string[];
   forbiddenImports: readonly string[];
   packageOrder: readonly string[];
+  requiredPackageUses: readonly FrontierRequiredPackageUse[];
   now: number;
   maxEvidenceAgeMs: number;
   budgets: FrontierLintBudget;
@@ -1321,6 +1357,67 @@ export const agentActionProofRule = defineLintRule({
   }
 });
 
+export const requiredPackageUseRule = defineLintRule({
+  id: 'frontier/require-package-use',
+  meta: {
+    title: 'Required Frontier packages must be used by matching surfaces',
+    description: 'Framework and app surfaces that opt into a Frontier capability should depend on or import the matching package.',
+    defaultSeverity: 'error',
+    category: 'correctness',
+    recommended: true,
+    tags: ['package-use', 'frontier-framework', 'agent']
+  },
+  check(context) {
+    const diagnostics: FrontierLintDiagnosticInput[] = [];
+    for (const requirement of context.config.requiredPackageUses) {
+      if (!requirement.required) continue;
+      const matchedResources = context.resources.filter((resource) => requirementMatchesResource(requirement, resource));
+      const matchedSources = context.sources.filter((source) => requirementMatchesSource(requirement, source));
+      if (matchedResources.length === 0 && matchedSources.length === 0) continue;
+
+      if (requirement.perSource && packageUseModeNeedsImport(requirement.mode)) {
+        for (const source of matchedSources) {
+          if (sourceImportsPackage(source, requirement)) continue;
+          diagnostics.push({
+            message: packageUseMessage(requirement, `Source "${source.file ?? source.id ?? 'source'}" does not import ${requirement.package}.`),
+            target: { id: source.id ?? source.file ?? requirement.id, kind: 'source', file: source.file },
+            range: source.file ? { file: source.file } : undefined,
+            evidence: [requirement.package],
+            suggestions: [{
+              title: 'Import the required Frontier package',
+              message: 'Wire this source through ' + requirement.package + ' or disable this requirement with a documented config override.',
+              safe: false,
+              operations: []
+            }],
+            tags: ['package-use', ...requirement.tags]
+          });
+        }
+        if (matchedSources.length > 0) continue;
+      }
+
+      if (packageUseSatisfied(context, requirement)) continue;
+      const targetResource = matchedResources[0];
+      const targetSource = matchedSources[0];
+      diagnostics.push({
+        message: packageUseMessage(requirement, `Matching Frontier surfaces do not use ${requirement.package}.`),
+        target: targetResource
+          ? { id: targetResource.id, kind: targetResource.kind, file: targetResource.files[0] }
+          : { id: targetSource?.id ?? targetSource?.file ?? requirement.id, kind: 'source', file: targetSource?.file },
+        range: targetSource?.file ? { file: targetSource.file } : targetResource?.files[0] ? { file: targetResource.files[0] } : undefined,
+        evidence: [requirement.package],
+        suggestions: [{
+          title: 'Declare or import the required Frontier package',
+          message: 'Add ' + requirement.package + ' to dependencies or import it from the matching source surface.',
+          safe: false,
+          operations: []
+        }],
+        tags: ['package-use', ...requirement.tags]
+      });
+    }
+    return diagnostics;
+  }
+});
+
 export const frontierRecommendedRules: readonly FrontierLintRule[] = [
   duplicateResourceIdRule,
   unknownEdgeTargetRule,
@@ -1337,7 +1434,8 @@ export const frontierRecommendedRules: readonly FrontierLintRule[] = [
   cyclicDependencyRule,
   forbiddenImportRule,
   packageLayerOrderRule,
-  agentActionProofRule
+  agentActionProofRule,
+  requiredPackageUseRule
 ];
 
 export const frontierRecommendedRuleset = createLintRuleset({
@@ -1367,11 +1465,37 @@ function normalizeConfig(input: FrontierLintInput, config: FrontierLintConfig): 
     dangerousEffectPrefixes: dedupeStrings(config.dangerousEffectPrefixes ?? input.dangerousEffectPrefixes ?? defaultDangerousEffectPrefixes),
     forbiddenImports: dedupeStrings((input.forbiddenImports ?? []).concat(config.forbiddenImports ?? [])),
     packageOrder: dedupeStrings(config.packageOrder ?? input.packageOrder ?? []),
+    requiredPackageUses: normalizeRequiredPackageUses((input.requiredPackageUses ?? []).concat(config.requiredPackageUses ?? [])),
     now: toTimestamp(config.now) ?? toTimestamp(input.now) ?? Date.now(),
     maxEvidenceAgeMs: config.maxEvidenceAgeMs ?? input.maxEvidenceAgeMs ?? FRONTIER_LINTER_DEFAULT_MAX_EVIDENCE_AGE_MS,
     budgets: { ...(input.budgets ?? {}), ...(config.budgets ?? {}) },
     metadata: asJsonObject(config.metadata ?? input.metadata)
   };
+}
+
+function normalizeRequiredPackageUses(input: readonly FrontierRequiredPackageUseInput[]): FrontierRequiredPackageUse[] {
+  const byId = new Map<string, FrontierRequiredPackageUse>();
+  for (const item of input) {
+    const packageName = item.package?.trim();
+    if (!packageName) continue;
+    const id = item.id ?? 'required-package:' + packageName;
+    byId.set(id, {
+      id,
+      package: packageName,
+      mode: item.mode ?? 'dependency-or-import',
+      required: item.required ?? true,
+      perSource: item.perSource ?? false,
+      reason: item.reason,
+      resourceKinds: dedupeStrings(item.resourceKinds ?? []),
+      resourceTags: dedupeStrings(item.resourceTags ?? []),
+      filePatterns: dedupeStrings(item.filePatterns ?? []),
+      importPatterns: dedupeStrings(item.importPatterns ?? []),
+      textPatterns: dedupeStrings(item.textPatterns ?? []),
+      tags: dedupeStrings(item.tags ?? []),
+      metadata: asJsonObject(item.metadata)
+    });
+  }
+  return Array.from(byId.values());
 }
 
 function normalizeResources(input: FrontierLintInput): FrontierLintResource[] {
@@ -1666,6 +1790,114 @@ function collectEvidenceForTarget(
     if (path !== target && pathsOverlap(path, target)) items.push(...bucket);
   }
   return items;
+}
+
+function requirementMatchesResource(requirement: FrontierRequiredPackageUse, resource: FrontierLintResource): boolean {
+  const hasExplicitMatcher = requirement.resourceKinds.length > 0
+    || requirement.resourceTags.length > 0
+    || requirement.filePatterns.length > 0
+    || requirement.importPatterns.length > 0
+    || requirement.textPatterns.length > 0;
+  if (!hasExplicitMatcher) return true;
+  if (requirement.resourceKinds.length > 0 && requirement.resourceKinds.includes(resource.kind)) return true;
+  if (requirement.resourceTags.length > 0 && resource.tags.some((tag) => requirement.resourceTags.includes(tag))) return true;
+  if (requirement.filePatterns.length > 0 && resource.files.some((file) => matchesAnyPattern(file, requirement.filePatterns))) return true;
+  if (requirement.importPatterns.length > 0 && resource.imports.some((specifier) => matchesAnyPattern(specifier, requirement.importPatterns) || packageSpecifierMatches(specifier, requirement.package))) return true;
+  if (requirement.textPatterns.length > 0 && resource.text && matchesAnyTextPattern(resource.text, requirement.textPatterns)) return true;
+  return false;
+}
+
+function requirementMatchesSource(requirement: FrontierRequiredPackageUse, source: FrontierLintSourceInput): boolean {
+  const hasExplicitMatcher = requirement.filePatterns.length > 0
+    || requirement.importPatterns.length > 0
+    || requirement.textPatterns.length > 0;
+  if (!hasExplicitMatcher && requirement.resourceKinds.length === 0 && requirement.resourceTags.length === 0) return true;
+  if (source.file && requirement.filePatterns.length > 0 && matchesAnyPattern(source.file, requirement.filePatterns)) return true;
+  const imports = dedupeStrings((source.imports ?? []).concat(extractImports(source.text)));
+  if (requirement.importPatterns.length > 0 && imports.some((specifier) => matchesAnyPattern(specifier, requirement.importPatterns) || packageSpecifierMatches(specifier, requirement.package))) return true;
+  if (source.text && requirement.textPatterns.length > 0 && matchesAnyTextPattern(source.text, requirement.textPatterns)) return true;
+  return false;
+}
+
+function packageUseSatisfied(context: FrontierLintContext, requirement: FrontierRequiredPackageUse): boolean {
+  if (requirement.mode === 'dependency') return contextHasPackage(context, requirement.package);
+  if (requirement.mode === 'import') return contextImportsPackage(context, requirement);
+  return contextHasPackage(context, requirement.package) || contextImportsPackage(context, requirement);
+}
+
+function packageUseModeNeedsImport(mode: FrontierRequiredPackageUseMode): boolean {
+  return mode === 'import' || mode === 'dependency-or-import';
+}
+
+function contextHasPackage(context: FrontierLintContext, packageName: string): boolean {
+  if (context.packagesByName.has(packageName)) return true;
+  return context.resources.some((resource) => resource.kind === 'package' && (resource.id === packageName || resource.package === packageName || resource.title === packageName));
+}
+
+function contextImportsPackage(context: FrontierLintContext, requirement: FrontierRequiredPackageUse): boolean {
+  return context.resources.some((resource) => resource.imports.some((specifier) => packageSpecifierMatchesRequirement(specifier, requirement)))
+    || context.sources.some((source) => sourceImportsPackage(source, requirement));
+}
+
+function sourceImportsPackage(source: FrontierLintSourceInput, requirement: FrontierRequiredPackageUse): boolean {
+  return dedupeStrings((source.imports ?? []).concat(extractImports(source.text)))
+    .some((specifier) => packageSpecifierMatchesRequirement(specifier, requirement));
+}
+
+function packageSpecifierMatchesRequirement(specifier: string, requirement: FrontierRequiredPackageUse): boolean {
+  return packageSpecifierMatches(specifier, requirement.package)
+    || requirement.importPatterns.some((pattern) => matchesPattern(specifier, pattern));
+}
+
+function packageSpecifierMatches(specifier: string, packageName: string): boolean {
+  return specifier === packageName || specifier.startsWith(packageName + '/');
+}
+
+function packageUseMessage(requirement: FrontierRequiredPackageUse, fallback: string): string {
+  return requirement.reason ? fallback + ' ' + requirement.reason : fallback;
+}
+
+function matchesAnyTextPattern(text: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => {
+    if (pattern.startsWith('/') && pattern.lastIndexOf('/') > 0) {
+      const lastSlash = pattern.lastIndexOf('/');
+      try {
+        return new RegExp(pattern.slice(1, lastSlash), pattern.slice(lastSlash + 1)).test(text);
+      } catch {
+        return text.includes(pattern);
+      }
+    }
+    return text.includes(pattern);
+  });
+}
+
+function matchesAnyPattern(value: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => matchesPattern(value, pattern));
+}
+
+function matchesPattern(value: string, pattern: string): boolean {
+  const normalizedValue = value.replace(/\\/g, '/');
+  const normalizedPattern = pattern.replace(/\\/g, '/');
+  if (normalizedPattern === normalizedValue) return true;
+  if (!normalizedPattern.includes('*')) return normalizedValue.includes(normalizedPattern);
+  let patternSource = '';
+  for (let index = 0; index < normalizedPattern.length; index++) {
+    const char = normalizedPattern[index];
+    if (char === '*' && normalizedPattern[index + 1] === '*') {
+      if (normalizedPattern[index + 2] === '/') {
+        patternSource += '(?:.*/)?';
+        index += 2;
+      } else {
+        patternSource += '.*';
+        index++;
+      }
+    } else if (char === '*') {
+      patternSource += '[^/]*';
+    } else {
+      patternSource += char.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp('^' + patternSource + '$').test(normalizedValue);
 }
 
 function resourceContainsAlias(resource: FrontierLintResource, id: string): boolean {

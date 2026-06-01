@@ -107,6 +107,71 @@ assert.ok(result.diagnostics.some((diagnostic) => diagnostic.ruleId === 'frontie
 assert.ok(result.diagnostics.some((diagnostic) => diagnostic.ruleId === 'frontier/package-layer-order'));
 assert.ok(result.diagnostics.some((diagnostic) => diagnostic.ruleId === 'frontier/custom-smoke'));
 
+const packageUseResult = lintFrontier({
+  id: 'lint.package-use',
+  packages: [{ name: '@shapeshift-labs/frontier-dom' }],
+  sources: [
+    {
+      id: 'source:home-view',
+      file: 'apps/web/src/components/HomeView.tsx',
+      text: "import { state } from '@shapeshift-labs/frontier-dom';\nexport function HomeView() { return <main />; }\n"
+    }
+  ],
+  requiredPackageUses: [
+    {
+      id: 'frontend-design',
+      package: '@shapeshift-labs/frontier-design',
+      mode: 'import',
+      perSource: true,
+      filePatterns: ['apps/web/src/**/*.tsx'],
+      reason: 'Frontend TSX must use Frontier design tokens or recipes.',
+      tags: ['design', 'frontend']
+    }
+  ]
+});
+assert.strictEqual(packageUseResult.summary.errorCount, 1);
+assert.ok(packageUseResult.diagnostics.some((diagnostic) => diagnostic.ruleId === 'frontier/require-package-use'));
+
+const packageUseDirectChildGlob = lintFrontier({
+  id: 'lint.package-use.direct-child-glob',
+  sources: [
+    {
+      id: 'source:missing-design',
+      file: 'apps/web/src/components/MissingDesign.tsx',
+      text: "import { state } from '@shapeshift-labs/frontier-dom';\nexport function MissingDesign() { return <main />; }\n"
+    }
+  ],
+  requiredPackageUses: [
+    {
+      package: '@shapeshift-labs/frontier-design',
+      mode: 'import',
+      perSource: true,
+      filePatterns: ['apps/web/src/components/**/*.tsx']
+    }
+  ]
+});
+assert.strictEqual(packageUseDirectChildGlob.summary.errorCount, 1);
+
+const packageUseOk = lintFrontier({
+  id: 'lint.package-use.ok',
+  sources: [
+    {
+      id: 'source:home-view',
+      file: 'apps/web/src/components/HomeView.tsx',
+      text: "import { defineDesignTokens } from '@shapeshift-labs/frontier-design';\nexport function HomeView() { return <main />; }\n"
+    }
+  ],
+  requiredPackageUses: [
+    {
+      package: '@shapeshift-labs/frontier-design',
+      mode: 'import',
+      perSource: true,
+      filePatterns: ['apps/web/src/**/*.tsx']
+    }
+  ]
+});
+assert.strictEqual(packageUseOk.summary.errorCount, 0);
+
 const errors = filterLintDiagnostics(result.diagnostics, { severity: ['error'] });
 assert.ok(errors.every((diagnostic) => diagnostic.severity === 'error'));
 

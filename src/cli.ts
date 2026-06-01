@@ -10,7 +10,7 @@ import {
   type FrontierLintConfig,
   type FrontierLintInput,
   type FrontierLintSeverity
-} from './index.js';
+} from './index.ts';
 
 interface CliOptions {
   files: string[];

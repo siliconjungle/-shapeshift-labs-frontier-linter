@@ -320,6 +320,13 @@ export interface FrontierSemanticOwnershipRegion {
   metadata?: JsonObject;
 }
 
+export type FrontierSemanticQueueScopeKind = 'semantic' | 'path' | 'lane' | 'repo';
+
+export interface FrontierSemanticQueueScope extends JsonObject {
+  kind: FrontierSemanticQueueScopeKind;
+  target: string;
+}
+
 export interface FrontierSemanticOwnershipEvidenceInput {
   id?: string;
   kind?: string;
@@ -1174,6 +1181,131 @@ export const semanticOwnershipEvidenceRule = defineLintRule({
   }
 });
 
+export const semanticOwnershipScopeRule = defineLintRule({
+  id: 'frontier/semantic-ownership-scope',
+  meta: {
+    title: 'Semantic ownership regions should stay inside queue scope',
+    description: 'Semantic ownership regions should not overlap, escape their declared write scope, or hide public contracts from queue planning.',
+    defaultSeverity: 'warning',
+    category: 'correctness',
+    recommended: true,
+    tags: ['semantic-ownership', 'ownership', 'merge-admission', 'queue-scope']
+  },
+  check(context) {
+    const diagnostics: FrontierLintDiagnosticInput[] = [];
+    const sourcesByFile = indexSemanticSourcesByFile(context);
+    const publicFiles = new Map<string, FrontierSemanticPublicSurface>();
+
+    for (const [file, source] of sourcesByFile) {
+      const exportedSymbols = semanticPublicExports(source.text);
+      if (exportedSymbols.length === 0) continue;
+      publicFiles.set(file, {
+        file,
+        sourceId: source.id,
+        package: source.package,
+        exportedSymbols
+      });
+    }
+
+    for (let leftIndex = 0; leftIndex < context.semanticOwnershipRegions.length; leftIndex++) {
+      const left = context.semanticOwnershipRegions[leftIndex];
+      const leftFile = semanticRegionFile(left);
+      if (!leftFile) continue;
+      for (let rightIndex = leftIndex + 1; rightIndex < context.semanticOwnershipRegions.length; rightIndex++) {
+        const right = context.semanticOwnershipRegions[rightIndex];
+        const rightFile = semanticRegionFile(right);
+        if (!rightFile || rightFile !== leftFile) continue;
+        if (!semanticRegionsOverlap(left, right)) continue;
+        const scope = semanticQueueScopeForRegionPair(left, right);
+        diagnostics.push({
+          severity: 'error',
+          message: `Semantic ownership regions ${semanticRegionLabel(left, leftIndex)} and ${semanticRegionLabel(right, rightIndex)} overlap in "${leftFile}".`,
+          target: semanticRegionTarget(left, { id: left.sourceId }, leftIndex),
+          range: semanticRegionRange(left),
+          evidence: dedupeStrings([left.sourceId, right.sourceId]),
+          metadata: {
+            regionIds: dedupeStrings([left.id ?? left.sourceId, right.id ?? right.sourceId]),
+            file: leftFile,
+            queueScope: scope
+          },
+          suggestions: [semanticQueueScopeSuggestion(scope, 'Split or narrow the overlapping semantic regions.')],
+          tags: ['semantic-ownership', 'ownership', 'merge-admission']
+        });
+      }
+    }
+
+    for (const item of context.semanticOwnership) {
+      for (const region of item.regions) {
+        const regionFile = semanticRegionFile(region);
+        if (!regionFile) continue;
+        const declared = item.changedPaths.some((changedPath) => semanticPathCoversFile(changedPath, regionFile));
+        if (declared) continue;
+        const scope = semanticQueueScopeForPath(regionFile);
+        diagnostics.push({
+          severity: 'error',
+          message: `Semantic ownership region ${semanticRegionLabel(region, 0)} escapes the declared changed-path scope for "${item.id}".`,
+          target: semanticRegionTarget(region, item, 0),
+          range: semanticRegionRange(region),
+          evidence: dedupeStrings([item.id, region.sourceId, regionFile]),
+          metadata: {
+            evidenceId: item.id,
+            file: regionFile,
+            changedPaths: item.changedPaths,
+            queueScope: scope
+          },
+          suggestions: [semanticQueueScopeSuggestion(scope, 'Align the queue scope with the changed path before admission.')],
+          tags: ['semantic-ownership', 'ownership', 'merge-admission']
+        });
+      }
+    }
+
+    for (const item of context.semanticOwnership) {
+      for (const changedPath of item.changedPaths) {
+        const changedFile = semanticPathFile(changedPath);
+        const publicSurface = publicFiles.get(changedFile);
+        if (!publicSurface) continue;
+        const ownedRegions = context.semanticOwnershipRegions.filter((region) => semanticRegionFile(region) === changedFile && semanticRegionHasOwner(region));
+        if (ownedRegions.length === 0) {
+          const scope = semanticQueueScopeForPath(changedFile);
+          diagnostics.push({
+            severity: 'error',
+            message: `Public exports in "${changedFile}" are not covered by an owned semantic region.`,
+            target: { id: publicSurface.sourceId, kind: 'source', file: changedFile },
+            path: changedFile,
+            evidence: publicSurface.exportedSymbols,
+            metadata: {
+              file: changedFile,
+              exportedSymbols: publicSurface.exportedSymbols,
+              evidenceId: item.id,
+              queueScope: scope
+            },
+            suggestions: [semanticQueueScopeSuggestion(scope, 'Assign a path scope owner before merging public exports.')],
+            tags: ['semantic-ownership', 'public-contract', 'ownership']
+          });
+        } else {
+          const scope = item.sourcePackage ? semanticQueueScopeForLane(item.sourcePackage) : semanticQueueScopeForRepo(item.id);
+          diagnostics.push({
+            message: `Public exports in "${changedFile}" are part of a public contract and should use a broader queue scope.`,
+            target: { id: publicSurface.sourceId, kind: 'source', file: changedFile },
+            path: changedFile,
+            evidence: publicSurface.exportedSymbols,
+            metadata: {
+              file: changedFile,
+              exportedSymbols: publicSurface.exportedSymbols,
+              evidenceId: item.id,
+              queueScope: scope
+            },
+            suggestions: [semanticQueueScopeSuggestion(scope, 'Escalate public-contract changes to a lane or repo queue scope.')],
+            tags: ['semantic-ownership', 'public-contract', 'merge-admission']
+          });
+        }
+      }
+    }
+
+    return diagnostics;
+  }
+});
+
 export const orphanRouteActionRule = defineLintRule({
   id: 'frontier/no-orphan-route-action',
   meta: {
@@ -1558,6 +1690,7 @@ export const frontierRecommendedRules: readonly FrontierLintRule[] = [
   requireOwnerRule,
   requireFeatureRule,
   semanticOwnershipEvidenceRule,
+  semanticOwnershipScopeRule,
   orphanRouteActionRule,
   requireTestEvidenceRule,
   requireBenchmarkEvidenceRule,
@@ -1966,7 +2099,7 @@ function collectEvidenceForTarget(
 
 function semanticRegionTarget(
   region: FrontierSemanticOwnershipRegion,
-  item: FrontierSemanticOwnershipEvidence,
+  item: { id: string },
   index: number
 ): FrontierLintTarget {
   return {
@@ -2016,6 +2149,141 @@ function semanticRegionCoversPath(region: FrontierSemanticOwnershipRegion, path:
     if (semanticPathsOverlap(regionPath, path)) return true;
   }
   return false;
+}
+
+function semanticPathCoversFile(path: string, file: string): boolean {
+  const normalizedPath = semanticPathFile(path);
+  const normalizedFile = semanticPathFile(file);
+  if (!normalizedPath || !normalizedFile) return false;
+  return semanticPathsOverlap(normalizedPath, normalizedFile);
+}
+
+function semanticRegionHasOwner(region: FrontierSemanticOwnershipRegion): boolean {
+  return Boolean(region.owner?.trim()) || region.owners.some((owner) => Boolean(owner.trim()));
+}
+
+function semanticRegionsOverlap(left: FrontierSemanticOwnershipRegion, right: FrontierSemanticOwnershipRegion): boolean {
+  const leftFile = semanticRegionFile(left);
+  const rightFile = semanticRegionFile(right);
+  if (!leftFile || !rightFile || leftFile !== rightFile) return false;
+  const leftRange = semanticRegionSpan(left);
+  const rightRange = semanticRegionSpan(right);
+  if (!leftRange || !rightRange) return true;
+  const overlapStartLine = Math.max(leftRange.startLine, rightRange.startLine);
+  const overlapEndLine = Math.min(leftRange.endLine, rightRange.endLine);
+  if (overlapStartLine > overlapEndLine) return false;
+  if (overlapStartLine < overlapEndLine) return true;
+  const leftStartColumn = leftRange.startLine === overlapStartLine ? leftRange.startColumn : 1;
+  const leftEndColumn = leftRange.endLine === overlapEndLine ? leftRange.endColumn : Number.POSITIVE_INFINITY;
+  const rightStartColumn = rightRange.startLine === overlapStartLine ? rightRange.startColumn : 1;
+  const rightEndColumn = rightRange.endLine === overlapEndLine ? rightRange.endColumn : Number.POSITIVE_INFINITY;
+  return leftStartColumn <= rightEndColumn && rightStartColumn <= leftEndColumn;
+}
+
+function semanticRegionSpan(region: FrontierSemanticOwnershipRegion): { startLine: number; startColumn: number; endLine: number; endColumn: number } | undefined {
+  if (region.startLine === undefined && region.startColumn === undefined && region.endLine === undefined && region.endColumn === undefined) return undefined;
+  return {
+    startLine: region.startLine ?? 1,
+    startColumn: region.startColumn ?? 1,
+    endLine: region.endLine ?? Number.POSITIVE_INFINITY,
+    endColumn: region.endColumn ?? Number.POSITIVE_INFINITY
+  };
+}
+
+function semanticQueueScopeForRegionPair(left: FrontierSemanticOwnershipRegion, right: FrontierSemanticOwnershipRegion): FrontierSemanticQueueScope {
+  const leftTarget = left.id ?? left.sourceId;
+  const rightTarget = right.id ?? right.sourceId;
+  return {
+    kind: 'semantic',
+    target: leftTarget === rightTarget ? leftTarget : `${leftTarget}~${rightTarget}`
+  };
+}
+
+function semanticQueueScopeForPath(path: string): FrontierSemanticQueueScope {
+  return {
+    kind: 'path',
+    target: path
+  };
+}
+
+function semanticQueueScopeForLane(target: string): FrontierSemanticQueueScope {
+  return {
+    kind: 'lane',
+    target
+  };
+}
+
+function semanticQueueScopeForRepo(target: string): FrontierSemanticQueueScope {
+  return {
+    kind: 'repo',
+    target
+  };
+}
+
+function semanticQueueScopeSuggestion(scope: FrontierSemanticQueueScope, message: string): FrontierLintSuggestion {
+  return {
+    title: `Use ${scope.kind} queue scope`,
+    message,
+    safe: false,
+    operations: [],
+    metadata: {
+      queueScope: scope
+    }
+  };
+}
+
+interface FrontierSemanticPublicSurface {
+  file: string;
+  sourceId: string;
+  package?: string;
+  exportedSymbols: string[];
+}
+
+function indexSemanticSourcesByFile(context: FrontierLintContext): Map<string, { id: string; file: string; package?: string; text: string }> {
+  const sources = new Map<string, { id: string; file: string; package?: string; text: string }>();
+  for (const resource of context.resources) {
+    if (resource.kind !== 'source' || !resource.files[0] || !resource.text) continue;
+    const file = semanticPathFile(resource.files[0]);
+    if (!file || sources.has(file)) continue;
+    sources.set(file, {
+      id: resource.id,
+      file,
+      package: resource.package,
+      text: resource.text
+    });
+  }
+  for (const source of context.sources) {
+    if (!source.file || !source.text) continue;
+    const file = semanticPathFile(source.file);
+    if (!file || sources.has(file)) continue;
+    sources.set(file, {
+      id: source.id ?? source.file,
+      file,
+      package: source.package,
+      text: source.text
+    });
+  }
+  return sources;
+}
+
+function semanticPublicExports(text: string | undefined): string[] {
+  if (!text) return [];
+  const exports = new Set<string>();
+  const declarationPattern = /\bexport\s+(?:declare\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface|enum)\s+([A-Za-z_$][\w$]*)/g;
+  const bracePattern = /\bexport\s*\{([^}]+)\}/g;
+  const defaultPattern = /\bexport\s+default\b/g;
+  const starPattern = /\bexport\s*\*\s+from\b/g;
+  let match: RegExpExecArray | null;
+  while ((match = declarationPattern.exec(text)) !== null) exports.add(match[1]);
+  while ((match = bracePattern.exec(text)) !== null) {
+    for (const entry of match[1].split(',')) {
+      const name = entry.trim().split(/\s+as\s+/i).pop()?.trim();
+      if (name) exports.add(name);
+    }
+  }
+  if (defaultPattern.test(text)) exports.add('default');
+  if (starPattern.test(text)) exports.add('*');
+  return Array.from(exports);
 }
 
 function semanticPathsOverlap(a: string, b: string): boolean {

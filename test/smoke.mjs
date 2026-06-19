@@ -174,42 +174,96 @@ assert.strictEqual(packageUseOk.summary.errorCount, 0);
 
 const semanticOwnershipResult = lintFrontier({
   id: 'lint.semantic-ownership',
+  sources: [
+    {
+      id: 'source:same-file',
+      file: 'packages/frontier-linter/src/same-file.ts',
+      text: 'const left = 1;\nconst right = 2;\n'
+    },
+    {
+      id: 'source:public-contract',
+      file: 'packages/frontier-linter/src/public-contract.ts',
+      text: 'export function published() {\n  return 1;\n}\nexport const stable = 2;\n'
+    },
+    {
+      id: 'source:unowned-contract',
+      file: 'packages/frontier-linter/src/unowned-contract.ts',
+      text: 'export default function orphan() {\n  return 0;\n}\n'
+    },
+    {
+      id: 'source:escape-contract',
+      file: 'packages/frontier-linter/src/escape-contract.ts',
+      text: 'const escape = true;\n'
+    }
+  ],
   semanticOwnership: [
     {
       id: 'semantic-imports:worker-a',
+      sourcePackage: '@shapeshift-labs/frontier-linter',
       changedPaths: [
-        'packages/frontier-linter/src/index.ts',
-        'packages/frontier-linter/README.md'
+        'packages/frontier-linter/src/same-file.ts',
+        'packages/frontier-linter/src/public-contract.ts',
+        'packages/frontier-linter/src/unowned-contract.ts'
       ],
       regions: [
         {
-          path: 'packages/frontier-linter/src/index.ts',
+          id: 'packages/frontier-linter/src/same-file.ts#region-left',
+          path: 'packages/frontier-linter/src/same-file.ts',
+          startLine: 1,
+          endLine: 1,
           owner: 'agent:worker-a'
         },
         {
-          id: 'packages/frontier-linter/src/index.ts#semanticOwnershipDiagnostics',
-          path: 'packages/frontier-linter/src/index.ts',
-          owner: 'agent:worker-a'
-        },
-        {
-          id: 'packages/frontier-linter/test/smoke.mjs#semanticOwnershipDiagnostics',
-          path: 'packages/frontier-linter/test/smoke.mjs',
-          owner: 'agent:worker-a'
-        },
-        {
-          id: 'packages/frontier-linter/test/smoke.mjs#semanticOwnershipDiagnostics',
-          path: 'packages/frontier-linter/test/smoke.mjs',
+          id: 'packages/frontier-linter/src/same-file.ts#region-right',
+          path: 'packages/frontier-linter/src/same-file.ts',
+          startLine: 3,
+          endLine: 3,
           owner: 'agent:worker-b'
+        },
+        {
+          id: 'packages/frontier-linter/src/public-contract.ts#region-a',
+          path: 'packages/frontier-linter/src/public-contract.ts',
+          startLine: 1,
+          endLine: 2,
+          owner: 'agent:worker-a'
+        },
+        {
+          id: 'packages/frontier-linter/src/public-contract.ts#region-b',
+          path: 'packages/frontier-linter/src/public-contract.ts',
+          startLine: 2,
+          endLine: 4,
+          owner: 'agent:worker-b'
+        },
+        {
+          id: 'packages/frontier-linter/src/unowned-contract.ts#region',
+          path: 'packages/frontier-linter/src/unowned-contract.ts',
+          startLine: 1,
+          endLine: 2
+        },
+        {
+          id: 'packages/frontier-linter/src/escape-contract.ts#region',
+          path: 'packages/frontier-linter/src/escape-contract.ts',
+          startLine: 1,
+          endLine: 1,
+          owner: 'agent:worker-a'
         }
       ]
     }
   ]
 });
-const semanticOwnershipDiagnostics = semanticOwnershipResult.diagnostics.filter((diagnostic) => diagnostic.ruleId === 'frontier/semantic-ownership-evidence');
-assert.strictEqual(semanticOwnershipDiagnostics.length, 3);
-assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('has no region id')));
-assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('appears 2 times')));
-assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('has no declared semantic ownership region')));
+const semanticOwnershipEvidenceDiagnostics = semanticOwnershipResult.diagnostics.filter((diagnostic) => diagnostic.ruleId === 'frontier/semantic-ownership-evidence');
+assert.strictEqual(semanticOwnershipEvidenceDiagnostics.length, 0);
+const semanticOwnershipScopeDiagnostics = semanticOwnershipResult.diagnostics.filter((diagnostic) => diagnostic.ruleId === 'frontier/semantic-ownership-scope');
+assert.strictEqual(semanticOwnershipScopeDiagnostics.length, 4);
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.message.includes('overlap in "packages/frontier-linter/src/public-contract.ts"')));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.message.includes('escapes the declared changed-path scope')));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.message.includes('are not covered by an owned semantic region')));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.message.includes('public contract')));
+assert.ok(semanticOwnershipScopeDiagnostics.every((diagnostic) => diagnostic.suggestions?.[0]?.metadata?.queueScope?.kind));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.suggestions?.[0]?.metadata?.queueScope?.kind === 'semantic'));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.suggestions?.[0]?.metadata?.queueScope?.kind === 'path'));
+assert.ok(semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.suggestions?.[0]?.metadata?.queueScope?.kind === 'lane'));
+assert.ok(!semanticOwnershipScopeDiagnostics.some((diagnostic) => diagnostic.message.includes('same-file.ts') && diagnostic.message.includes('overlap')));
 
 const errors = filterLintDiagnostics(result.diagnostics, { severity: ['error'] });
 assert.ok(errors.every((diagnostic) => diagnostic.severity === 'error'));

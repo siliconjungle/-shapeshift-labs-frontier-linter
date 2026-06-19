@@ -242,7 +242,7 @@ if (!result.summary.valid) {
 - `createLintRegistryGraph()` exposes diagnostics as Frontier registry entries and records.
 - `createLintProof()` gives a compact deterministic digest for replay/evidence gates.
 
-Built-in rules cover duplicate IDs, unknown graph edges, JSON Pointer paths, owner and feature metadata, semantic ownership evidence quality, route/action resolution, mutable-resource test evidence, hot-path benchmark evidence, dangerous effects without policy guards, effectful actions without rollback, uncovered state writes, stale evidence, dependency cycles, forbidden imports, package layer order, and agent-facing resources without proof.
+Built-in rules cover duplicate IDs, unknown graph edges, JSON Pointer paths, owner and feature metadata, semantic ownership evidence quality, semantic region queue-scope conflicts, route/action resolution, mutable-resource test evidence, hot-path benchmark evidence, dangerous effects without policy guards, effectful actions without rollback, uncovered state writes, stale evidence, dependency cycles, forbidden imports, package layer order, and agent-facing resources without proof.
 
 ## Semantic Ownership Evidence
 
@@ -266,7 +266,9 @@ const result = lintFrontier({
 });
 ```
 
-The `frontier/semantic-ownership-evidence` rule reports regions with missing IDs, duplicate region IDs, and changed paths that are not covered by any declared region. Coordinators can use those diagnostics to reject or downgrade merge bundles before automatic admission when a worker changed files but did not provide stable semantic ownership evidence.
+The `frontier/semantic-ownership-evidence` rule reports regions with missing IDs, duplicate region IDs, and changed paths that are not covered by any declared region.
+
+The `frontier/semantic-ownership-scope` rule reports overlapping regions, write-scope escapes, unowned public exports, and public-contract risk. Each diagnostic carries a suggested semantic, path, lane, or repo queue scope so merge coordinators can route work to the narrowest safe admission lane before automatic merge.
 
 ## Linter Boundary
 

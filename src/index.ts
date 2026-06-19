@@ -289,6 +289,56 @@ export interface FrontierLintEvidence {
   metadata?: JsonObject;
 }
 
+export interface FrontierSemanticOwnershipRegionInput {
+  id?: string;
+  kind?: string;
+  path?: string;
+  paths?: readonly string[];
+  file?: string;
+  files?: readonly string[];
+  owner?: string;
+  owners?: readonly string[];
+  startLine?: number;
+  startColumn?: number;
+  endLine?: number;
+  endColumn?: number;
+  metadata?: unknown;
+}
+
+export interface FrontierSemanticOwnershipRegion {
+  id?: string;
+  kind: string;
+  sourceId: string;
+  paths: string[];
+  files: string[];
+  owner?: string;
+  owners: string[];
+  startLine?: number;
+  startColumn?: number;
+  endLine?: number;
+  endColumn?: number;
+  metadata?: JsonObject;
+}
+
+export interface FrontierSemanticOwnershipEvidenceInput {
+  id?: string;
+  kind?: string;
+  sourcePackage?: string;
+  changedPaths?: readonly string[];
+  changedFiles?: readonly string[];
+  regions?: readonly FrontierSemanticOwnershipRegionInput[];
+  metadata?: unknown;
+}
+
+export interface FrontierSemanticOwnershipEvidence {
+  id: string;
+  kind: string;
+  sourcePackage?: string;
+  changedPaths: string[];
+  regions: FrontierSemanticOwnershipRegion[];
+  metadata?: JsonObject;
+}
+
 export interface FrontierLintPackageInput {
   id?: string;
   name: string;
@@ -398,6 +448,7 @@ export interface FrontierLintInput extends FrontierLintConfig {
   records?: readonly FrontierRegistryRecord[];
   sources?: readonly FrontierLintSourceInput[];
   packages?: readonly FrontierLintPackageInput[];
+  semanticOwnership?: readonly FrontierSemanticOwnershipEvidenceInput[];
 }
 
 export interface FrontierLintSummary {
@@ -450,9 +501,12 @@ export interface FrontierLintContext {
   readonly resources: readonly FrontierLintResource[];
   readonly edges: readonly FrontierLintEdge[];
   readonly evidence: readonly FrontierLintEvidence[];
+  readonly semanticOwnership: readonly FrontierSemanticOwnershipEvidence[];
+  readonly semanticOwnershipRegions: readonly FrontierSemanticOwnershipRegion[];
   readonly packages: readonly FrontierLintPackage[];
   readonly sources: readonly FrontierLintSourceInput[];
   readonly duplicateResourceIds: ReadonlyMap<string, readonly FrontierLintResource[]>;
+  readonly duplicateSemanticOwnershipRegionIds: ReadonlyMap<string, readonly FrontierSemanticOwnershipRegion[]>;
   readonly resourcesById: ReadonlyMap<string, FrontierLintResource>;
   readonly evidenceByNode: ReadonlyMap<string, readonly FrontierLintEvidence[]>;
   readonly evidenceByPath: ReadonlyMap<string, readonly FrontierLintEvidence[]>;
@@ -582,6 +636,8 @@ export function createLintContext(input: FrontierLintInput, config: FrontierLint
   const resources = normalizeResources(input);
   const edges = normalizeEdges(input);
   const evidence = normalizeEvidence(input);
+  const semanticOwnership = normalizeSemanticOwnership(input);
+  const semanticOwnershipRegions = semanticOwnership.flatMap((item) => item.regions);
   const packages = normalizePackages(input);
   const sources = (input.sources ?? []).map((source, index) => normalizeSourceInput(source, index));
   const generatedAt = toTimestamp(input.generatedAt) ?? mergedConfig.now;
@@ -595,6 +651,14 @@ export function createLintContext(input: FrontierLintInput, config: FrontierLint
   const duplicateResourceIds = new Map<string, readonly FrontierLintResource[]>();
   for (const [id, bucket] of resourceBuckets) {
     if (bucket.length > 1) duplicateResourceIds.set(id, bucket.slice());
+  }
+  const semanticRegionBuckets = new Map<string, FrontierSemanticOwnershipRegion[]>();
+  for (const region of semanticOwnershipRegions) {
+    if (region.id) appendMapArray(semanticRegionBuckets, region.id, region);
+  }
+  const duplicateSemanticOwnershipRegionIds = new Map<string, readonly FrontierSemanticOwnershipRegion[]>();
+  for (const [id, bucket] of semanticRegionBuckets) {
+    if (bucket.length > 1) duplicateSemanticOwnershipRegionIds.set(id, bucket.slice());
   }
   const evidenceByNode = new Map<string, FrontierLintEvidence[]>();
   const evidenceByPath = new Map<string, FrontierLintEvidence[]>();
@@ -612,9 +676,12 @@ export function createLintContext(input: FrontierLintInput, config: FrontierLint
     resources,
     edges,
     evidence,
+    semanticOwnership,
+    semanticOwnershipRegions,
     packages,
     sources,
     duplicateResourceIds,
+    duplicateSemanticOwnershipRegionIds,
     resourcesById,
     evidenceByNode,
     evidenceByPath,
@@ -1041,6 +1108,72 @@ export const requireFeatureRule = defineLintRule({
   }
 });
 
+export const semanticOwnershipEvidenceRule = defineLintRule({
+  id: 'frontier/semantic-ownership-evidence',
+  meta: {
+    title: 'Semantic ownership evidence should be complete',
+    description: 'Agent merge admission relies on stable semantic region IDs and changed-path coverage.',
+    defaultSeverity: 'error',
+    category: 'correctness',
+    recommended: true,
+    tags: ['semantic-ownership', 'evidence', 'agent', 'merge-admission']
+  },
+  check(context) {
+    const diagnostics: FrontierLintDiagnosticInput[] = [];
+    for (const item of context.semanticOwnership) {
+      for (let index = 0; index < item.regions.length; index++) {
+        const region = item.regions[index];
+        if (region.id) continue;
+        diagnostics.push({
+          message: `Semantic ownership region ${semanticRegionLabel(region, index)} has no region id.`,
+          target: semanticRegionTarget(region, item, index),
+          range: semanticRegionRange(region),
+          evidence: [item.id],
+          metadata: {
+            evidenceId: item.id,
+            regionIndex: index,
+            paths: region.paths
+          },
+          tags: ['semantic-ownership', 'merge-admission']
+        });
+      }
+    }
+
+    for (const [id, regions] of context.duplicateSemanticOwnershipRegionIds) {
+      const first = regions[0];
+      diagnostics.push({
+        message: `Semantic ownership region id "${id}" appears ${regions.length} times.`,
+        target: { id, kind: 'evidence', file: first ? semanticRegionFile(first) : undefined },
+        range: first ? semanticRegionRange(first) : undefined,
+        evidence: dedupeStrings(regions.map((region) => region.sourceId)),
+        metadata: {
+          regionId: id,
+          sourceIds: dedupeStrings(regions.map((region) => region.sourceId)),
+          paths: dedupeStrings(regions.flatMap((region) => region.paths))
+        },
+        tags: ['semantic-ownership', 'identity', 'merge-admission']
+      });
+    }
+
+    for (const item of context.semanticOwnership) {
+      for (const changedPath of item.changedPaths) {
+        if (semanticPathHasDeclaredRegion(changedPath, context.semanticOwnershipRegions)) continue;
+        diagnostics.push({
+          message: `Changed path "${changedPath}" has no declared semantic ownership region.`,
+          target: { id: item.id, kind: 'evidence', file: semanticPathFile(changedPath) },
+          evidence: [changedPath],
+          metadata: {
+            evidenceId: item.id,
+            changedPath
+          },
+          tags: ['semantic-ownership', 'coverage', 'merge-admission']
+        });
+      }
+    }
+    return diagnostics;
+  }
+});
+
 export const orphanRouteActionRule = defineLintRule({
   id: 'frontier/no-orphan-route-action',
   meta: {
@@ -1424,6 +1557,7 @@ export const frontierRecommendedRules: readonly FrontierLintRule[] = [
   validJsonPointerRule,
   requireOwnerRule,
   requireFeatureRule,
+  semanticOwnershipEvidenceRule,
   orphanRouteActionRule,
   requireTestEvidenceRule,
   requireBenchmarkEvidenceRule,
@@ -1582,6 +1716,44 @@ function normalizeEvidenceItem(input: FrontierLintEvidenceInput, index: number):
     benchmarks: dedupeStrings(input.benchmarks ?? []),
     status: input.status,
     timestamp: toTimestamp(input.timestamp),
+    metadata: asJsonObject(input.metadata)
+  };
+}
+
+function normalizeSemanticOwnership(input: FrontierLintInput): FrontierSemanticOwnershipEvidence[] {
+  return (input.semanticOwnership ?? []).map((item, index) => normalizeSemanticOwnershipItem(item, index));
+}
+
+function normalizeSemanticOwnershipItem(input: FrontierSemanticOwnershipEvidenceInput, index: number): FrontierSemanticOwnershipEvidence {
+  const id = input.id?.trim() || `semantic-ownership:${index}`;
+  return {
+    id,
+    kind: input.kind?.trim() || 'semantic-ownership',
+    sourcePackage: input.sourcePackage,
+    changedPaths: normalizeSemanticPaths((input.changedPaths ?? []).concat(input.changedFiles ?? [])),
+    regions: (input.regions ?? []).map((region) => normalizeSemanticOwnershipRegion(region, id)),
+    metadata: asJsonObject(input.metadata)
+  };
+}
+
+function normalizeSemanticOwnershipRegion(input: FrontierSemanticOwnershipRegionInput, sourceId: string): FrontierSemanticOwnershipRegion {
+  const id = input.id?.trim() || undefined;
+  const explicitPaths = normalizeSemanticPaths((input.path ? [input.path] : []).concat(input.paths ?? []));
+  const files = normalizeSemanticPaths((input.file ? [input.file] : []).concat(input.files ?? []));
+  const idPath = semanticRegionPathFromId(id);
+  const paths = dedupeStrings(explicitPaths.concat(files, idPath ? [idPath] : []));
+  return {
+    id,
+    kind: input.kind?.trim() || 'region',
+    sourceId,
+    paths,
+    files,
+    owner: input.owner,
+    owners: dedupeStrings((input.owner ? [input.owner] : []).concat(input.owners ?? [])),
+    startLine: input.startLine,
+    startColumn: input.startColumn,
+    endLine: input.endLine,
+    endColumn: input.endColumn,
     metadata: asJsonObject(input.metadata)
   };
 }
@@ -1792,6 +1964,69 @@ function collectEvidenceForTarget(
   return items;
 }
 
+function semanticRegionTarget(
+  region: FrontierSemanticOwnershipRegion,
+  item: FrontierSemanticOwnershipEvidence,
+  index: number
+): FrontierLintTarget {
+  return {
+    id: region.id ?? `${item.id}:region:${index}`,
+    kind: 'evidence',
+    file: semanticRegionFile(region)
+  };
+}
+
+function semanticRegionRange(region: FrontierSemanticOwnershipRegion): FrontierLintRange | undefined {
+  const file = semanticRegionFile(region);
+  if (!file && region.startLine === undefined && region.startColumn === undefined && region.endLine === undefined && region.endColumn === undefined) {
+    return undefined;
+  }
+  return {
+    file,
+    startLine: region.startLine,
+    startColumn: region.startColumn,
+    endLine: region.endLine,
+    endColumn: region.endColumn
+  };
+}
+
+function semanticRegionLabel(region: FrontierSemanticOwnershipRegion, index: number): string {
+  const path = semanticRegionFile(region) ?? region.paths[0];
+  return path ? `"${path}"` : `#${index}`;
+}
+
+function semanticRegionFile(region: FrontierSemanticOwnershipRegion): string | undefined {
+  const file = region.files[0] ?? region.paths[0] ?? semanticRegionPathFromId(region.id);
+  return file ? semanticPathFile(file) : undefined;
+}
+
+function semanticPathFile(path: string): string {
+  const normalized = normalizeSemanticPath(path);
+  const hashIndex = normalized.indexOf('#');
+  return hashIndex >= 0 ? normalized.slice(0, hashIndex) : normalized;
+}
+
+function semanticPathHasDeclaredRegion(path: string, regions: readonly FrontierSemanticOwnershipRegion[]): boolean {
+  const normalized = normalizeSemanticPath(path);
+  return normalized.length > 0 && regions.some((region) => Boolean(region.id) && semanticRegionCoversPath(region, normalized));
+}
+
+function semanticRegionCoversPath(region: FrontierSemanticOwnershipRegion, path: string): boolean {
+  for (const regionPath of region.paths) {
+    if (semanticPathsOverlap(regionPath, path)) return true;
+  }
+  return false;
+}
+
+function semanticPathsOverlap(a: string, b: string): boolean {
+  const left = semanticPathFile(a);
+  const right = semanticPathFile(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return left.startsWith(right.endsWith('/') ? right : right + '/')
+    || right.startsWith(left.endsWith('/') ? left : left + '/');
+}
+
 function requirementMatchesResource(requirement: FrontierRequiredPackageUse, resource: FrontierLintResource): boolean {
   const hasExplicitMatcher = requirement.resourceKinds.length > 0
     || requirement.resourceTags.length > 0
@@ -1925,6 +2160,21 @@ function normalizePaths(paths: readonly FrontierRegistryPath[]): string[] {
     }
   }
   return dedupeStrings(normalized);
+}
+
+function normalizeSemanticPaths(paths: readonly string[]): string[] {
+  return dedupeStrings(paths.map((path) => normalizeSemanticPath(path)));
+}
+
+function normalizeSemanticPath(path: string): string {
+  return String(path).trim().replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function semanticRegionPathFromId(id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  const hashIndex = id.indexOf('#');
+  if (hashIndex <= 0) return undefined;
+  return normalizeSemanticPath(id.slice(0, hashIndex));
 }
 
 function normalizeSource(source: string | FrontierRegistrySource | undefined): FrontierRegistrySource | undefined {

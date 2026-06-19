@@ -242,7 +242,31 @@ if (!result.summary.valid) {
 - `createLintRegistryGraph()` exposes diagnostics as Frontier registry entries and records.
 - `createLintProof()` gives a compact deterministic digest for replay/evidence gates.
 
-Built-in rules cover duplicate IDs, unknown graph edges, JSON Pointer paths, owner and feature metadata, route/action resolution, mutable-resource test evidence, hot-path benchmark evidence, dangerous effects without policy guards, effectful actions without rollback, uncovered state writes, stale evidence, dependency cycles, forbidden imports, package layer order, and agent-facing resources without proof.
+Built-in rules cover duplicate IDs, unknown graph edges, JSON Pointer paths, owner and feature metadata, semantic ownership evidence quality, route/action resolution, mutable-resource test evidence, hot-path benchmark evidence, dangerous effects without policy guards, effectful actions without rollback, uncovered state writes, stale evidence, dependency cycles, forbidden imports, package layer order, and agent-facing resources without proof.
+
+## Semantic Ownership Evidence
+
+Agent runners can feed semantic merge evidence through `semanticOwnership` without depending on a specific runner package:
+
+```ts
+const result = lintFrontier({
+  semanticOwnership: [
+    {
+      id: 'semantic-imports:worker-17',
+      changedPaths: ['packages/frontier-linter/src/index.ts'],
+      regions: [
+        {
+          id: 'packages/frontier-linter/src/index.ts#semanticOwnershipDiagnostics',
+          path: 'packages/frontier-linter/src/index.ts',
+          owner: 'agent:worker-17'
+        }
+      ]
+    }
+  ]
+});
+```
+
+The `frontier/semantic-ownership-evidence` rule reports regions with missing IDs, duplicate region IDs, and changed paths that are not covered by any declared region. Coordinators can use those diagnostics to reject or downgrade merge bundles before automatic admission when a worker changed files but did not provide stable semantic ownership evidence.
 
 ## Linter Boundary
 

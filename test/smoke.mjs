@@ -172,6 +172,45 @@ const packageUseOk = lintFrontier({
 });
 assert.strictEqual(packageUseOk.summary.errorCount, 0);
 
+const semanticOwnershipResult = lintFrontier({
+  id: 'lint.semantic-ownership',
+  semanticOwnership: [
+    {
+      id: 'semantic-imports:worker-a',
+      changedPaths: [
+        'packages/frontier-linter/src/index.ts',
+        'packages/frontier-linter/README.md'
+      ],
+      regions: [
+        {
+          path: 'packages/frontier-linter/src/index.ts',
+          owner: 'agent:worker-a'
+        },
+        {
+          id: 'packages/frontier-linter/src/index.ts#semanticOwnershipDiagnostics',
+          path: 'packages/frontier-linter/src/index.ts',
+          owner: 'agent:worker-a'
+        },
+        {
+          id: 'packages/frontier-linter/test/smoke.mjs#semanticOwnershipDiagnostics',
+          path: 'packages/frontier-linter/test/smoke.mjs',
+          owner: 'agent:worker-a'
+        },
+        {
+          id: 'packages/frontier-linter/test/smoke.mjs#semanticOwnershipDiagnostics',
+          path: 'packages/frontier-linter/test/smoke.mjs',
+          owner: 'agent:worker-b'
+        }
+      ]
+    }
+  ]
+});
+const semanticOwnershipDiagnostics = semanticOwnershipResult.diagnostics.filter((diagnostic) => diagnostic.ruleId === 'frontier/semantic-ownership-evidence');
+assert.strictEqual(semanticOwnershipDiagnostics.length, 3);
+assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('has no region id')));
+assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('appears 2 times')));
+assert.ok(semanticOwnershipDiagnostics.some((diagnostic) => diagnostic.message.includes('has no declared semantic ownership region')));
+
 const errors = filterLintDiagnostics(result.diagnostics, { severity: ['error'] });
 assert.ok(errors.every((diagnostic) => diagnostic.severity === 'error'));
 
